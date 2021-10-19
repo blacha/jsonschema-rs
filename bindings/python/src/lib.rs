@@ -14,13 +14,16 @@
 )]
 #![allow(clippy::upper_case_acronyms)]
 
+use jsonschema::ErrorIterator;
 use jsonschema::{paths::JSONPointer, Draft};
 use pyo3::{
     exceptions,
     prelude::*,
     types::{PyAny, PyList, PyType},
-    wrap_pyfunction, PyObjectProtocol,
+    wrap_pyfunction, PyObjectProtocol, PyIterProtocol
 };
+use pyo3::class::iter::IterNextOutput;
+
 
 mod ser;
 mod string;
@@ -83,6 +86,31 @@ fn into_py_err(py: Python, error: jsonschema::ValidationError) -> PyResult<PyErr
     ))
 }
 
+#[pyclass]
+struct ValidationErrorIter {
+    iter: Result<(), ErrorIterator<'static>>,
+}
+
+#[pyproto]
+impl PyIterProtocol for ValidationErrorIter {
+    fn __iter__(slf: PyRef<Self>) -> PyRef<Self> {
+        slf
+    }
+    fn __next__(mut slf: PyRefMut<Self>) -> IterNextOutput<String, &'static str> {
+        match slf.iter {
+            Err(itr) => {
+                match itr.next() {
+                    // TODO use error object
+                    Some(err) => IterNextOutput::Yield(to_error_message(&err)),
+                    None => IterNextOutput::Return("Ended")
+                }
+            },
+            Ok(()) => IterNextOutput::Return("Ended")
+        }
+    }
+}
+
+
 fn into_path(py: Python, pointer: JSONPointer) -> PyResult<Py<PyList>> {
     let path = PyList::empty(py);
     for chunk in pointer {
@@ -131,6 +159,13 @@ fn raise_on_error(py: Python, compiled: &jsonschema::JSONSchema, instance: &PyAn
         .map(|mut errors| errors.next().expect("Iterator should not be empty"));
     error.map_or_else(|| Ok(()), |err| Err(into_py_err(py, err)?))
 }
+
+fn iter_on_error(py: Python, compiled: &jsonschema::JSONSchema, instance: &PyAny) -> PyResult<ValidationErrorIter> {
+    let instance = ser::to_value(instance)?;
+    let result = compiled.validate(&instance);
+    Ok(ValidationErrorIter {iter: result})
+}
+
 
 fn to_error_message(error: &jsonschema::ValidationError) -> String {
     let mut message = error.to_string();
@@ -243,6 +278,23 @@ fn validate(
     }
 }
 
+#[pyfunction]
+#[pyo3(text_signature = "(schema, instance, draft=None, with_meta_schemas=False)")]
+fn iter_errors(
+    py: Python,
+    schema: &PyAny,
+    instance: &PyAny,
+    draft: Option<u8>,
+    with_meta_schemas: Option<bool>,
+) -> PyResult<ValidationErrorIter> {
+    let options = make_options(draft, with_meta_schemas)?;
+    let schema = ser::to_value(schema)?;
+    match options.compile(&schema) {
+        Ok(compiled) => iter_on_error(py, &compiled, instance),
+        Err(error) => Err(into_py_err(py, error)?),
+    }
+}
+
 /// JSONSchema(schema, draft=None, with_meta_schemas=False)
 ///
 /// JSON Schema compiled into a validation tree.
@@ -342,6 +394,7 @@ fn jsonschema_rs(py: Python, module: &PyModule) -> PyResult<()> {
     types::init();
     module.add_wrapped(wrap_pyfunction!(is_valid))?;
     module.add_wrapped(wrap_pyfunction!(validate))?;
+    module.add_wrapped(wrap_pyfunction!(iter_errors))?;
     module.add_class::<JSONSchema>()?;
     module.add("ValidationError", py.get_type::<ValidationError>())?;
     module.add("Draft4", DRAFT4)?;

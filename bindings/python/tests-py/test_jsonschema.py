@@ -5,7 +5,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from jsonschema_rs import JSONSchema, ValidationError, is_valid, validate
+from jsonschema_rs import JSONSchema, ValidationError, is_valid, validate, iter_errors
 
 json = st.recursive(
     st.none() | st.booleans() | st.floats() | st.integers() | st.text(),
@@ -127,3 +127,12 @@ Failed validating "type" in schema["properties"]["foo"]
 On instance["foo"]:
     null"""
         )
+
+
+def test_iter_err_message():
+    schema = {"properties": {"foo": {"type": "integer"},"bar": {"type": "string"}}}
+    instance = {"foo": None, "bar": None}
+    err_count = 0
+    for err in iter_errors(schema, instance):
+        err_count = err_count + 1
+    assert(err_count == 2)
